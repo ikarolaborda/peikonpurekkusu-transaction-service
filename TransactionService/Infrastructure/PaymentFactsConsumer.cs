@@ -76,8 +76,10 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
                 await Task.Delay(attempt * 200, ct);
             }
         }
-        await DeadLetterAsync(result, last, ct);
-        return true;
+        // Only advance the offset if the message is safely parked in the DLQ.
+        // If the DLQ write fails (e.g. coordinator flap), return false so the
+        // offset is NOT stored and the message is reprocessed — never lost.
+        return await DeadLetterAsync(result, last, ct);
     }
 
     private async Task HandleAsync(ConsumeResult<string, byte[]> result, CancellationToken ct)
@@ -123,7 +125,8 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
         await tx.CommitAsync(ct);
     }
 
-    private async Task DeadLetterAsync(ConsumeResult<string, byte[]> result, Exception? cause, CancellationToken ct)
+    /// <returns>true if the message is safely in the DLQ (offset may advance); false if the DLQ write failed (retry, don't lose it).</returns>
+    private async Task<bool> DeadLetterAsync(ConsumeResult<string, byte[]> result, Exception? cause, CancellationToken ct)
     {
         var dlq = $"{Group}.{result.Topic}.dlq";
         var message = new Message<string, byte[]>
@@ -144,10 +147,12 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
         {
             await producer.ProduceAsync(dlq, message, ct);
             log.LogWarning("message dead-lettered to {Dlq}: {Cause}", dlq, cause?.Message);
+            return true;
         }
         catch (Exception ex)
         {
-            log.LogError(ex, "DLQ publish FAILED — message dropped ({Cause})", cause?.Message);
+            log.LogError(ex, "DLQ publish failed — leaving offset unadvanced for retry ({Cause})", cause?.Message);
+            return false;
         }
     }
 }

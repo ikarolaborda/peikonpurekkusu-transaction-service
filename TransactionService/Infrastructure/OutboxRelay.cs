@@ -57,7 +57,8 @@ public sealed class OutboxRelay(IServiceScopeFactory scopes, IProducer<string, b
                 correlation_id = row.Id.ToString("N")[..32],
                 causation_id = (string?)null,
                 idempotency_key = (string?)null,
-                payload = row.Payload,
+                // parse so the stored JSON string embeds as an object, not a quoted literal
+                payload = System.Text.Json.Nodes.JsonNode.Parse(row.Payload),
             };
             var value = await codec.FrameAsync(row.Type, envelope, ct);
             await producer.ProduceAsync(row.Type,

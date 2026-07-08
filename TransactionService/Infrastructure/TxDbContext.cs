@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 
 namespace Peikon.Transactions.Infrastructure;
@@ -32,7 +31,8 @@ public sealed class OutboxEvent
     public required string AggregateType { get; init; }
     public required string AggregateId { get; init; }
     public required string Type { get; init; }
-    public required JsonDocument Payload { get; init; }
+    /// <summary>Serialized JSON payload (mapped to jsonb; string maps cleanly under both Npgsql and the in-memory test provider).</summary>
+    public required string Payload { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? ProcessedAt { get; set; }
 }

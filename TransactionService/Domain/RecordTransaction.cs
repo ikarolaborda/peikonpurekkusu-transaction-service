@@ -45,7 +45,7 @@ public sealed class RecordTransactionHandler(TxDbContext db) : ICommandHandler<R
             AggregateType = "transaction",
             AggregateId = txn.Id.ToString(),
             Type = "transactions.transaction.recorded.v1",
-            Payload = JsonSerializer.SerializeToDocument(new
+            Payload = JsonSerializer.Serialize(new
             {
                 transaction_id = txn.Id.ToString(),
                 payment_id = cmd.PaymentId,
