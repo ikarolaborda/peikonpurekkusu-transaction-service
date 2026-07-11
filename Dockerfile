@@ -1,10 +1,9 @@
 # syntax=docker/dockerfile:1.7
-# Build context: repo root (dockerfile: services/transaction-service/Dockerfile)
+# Build context: this component's own directory (self-contained).
 
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
-COPY services/transaction-service ./services/transaction-service
-WORKDIR /src/services/transaction-service
+COPY . .
 RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     dotnet restore TransactionService/TransactionService.csproj && \
     dotnet restore TransactionService.Tests/TransactionService.Tests.csproj && \
