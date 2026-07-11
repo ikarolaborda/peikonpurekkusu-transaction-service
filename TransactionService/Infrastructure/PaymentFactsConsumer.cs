@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Confluent.Kafka;
 using Microsoft.EntityFrameworkCore;
 using Peikon.Transactions.Domain;
@@ -7,7 +8,7 @@ namespace Peikon.Transactions.Infrastructure;
 /// <summary>
 /// Consumes payment facts and records immutable transactions:
 ///   payments.payment.captured.v1 → purchase row
-///   payments.payment.reversed.v1 → parked to DLQ (contract lacks refund fields)
+///   payments.payment.reversed.v1 → refund row (identity joined from the purchase)
 /// Payloads are validated against the schema id in the frame before any field
 /// is read — the transactions table is append-only, so a drifted producer must
 /// be dead-lettered, never written as a zero-amount row. Idempotent
@@ -127,16 +128,6 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
             throw new PoisonEventException(new FormatException("unparseable envelope"));
         }
 
-        if (envelope.EventType.Contains("reversed"))
-        {
-            // The reversed.v1 payload cannot carry account/user/merchant fields
-            // (additionalProperties:false), so a refund fact recorded from it
-            // would be a permanent garbage row. Park until the refunds contract
-            // is completed; the DLQ keeps it replayable.
-            throw new PoisonEventException(new NotSupportedException(
-                "payments.payment.reversed.v1 lacks the fields a refund fact needs — parked until the refunds contract is built"));
-        }
-
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<TxDbContext>();
         var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
@@ -155,7 +146,17 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
         // real failure: let it bubble so the event is retried, not silently acked.
 
         var p = envelope.Payload;
-        var command = new RecordTransaction(
+        var command = envelope.EventType.Contains("reversed")
+            ? await BuildRefundAsync(db, eventId, envelope, p, ct)
+            : BuildPurchase(eventId, envelope, p);
+        await mediator.SendAsync(command, ct);
+
+        await db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+    }
+
+    private static RecordTransaction BuildPurchase(Guid eventId, Envelope envelope, JsonObject p) =>
+        new(
             eventId,
             Require(p, "payment_id"),
             Require(p, "account_id"),
@@ -168,10 +169,54 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
             Require(p, "ledger_transaction_id"),
             (string?)p["psp_reference"] ?? "",
             envelope.OccurredAt);
-        await mediator.SendAsync(command, ct);
 
-        await db.SaveChangesAsync(ct);
-        await tx.CommitAsync(ct);
+    /// <summary>
+    /// A refund fact inherits its identity (user/account/merchant) from the
+    /// original purchase this service already recorded for the same payment — the
+    /// reversed.v1 payload deliberately carries no such fields, and the projection
+    /// is the system of record for who a payment belongs to. Amount and currency
+    /// come from the event so partial refunds are honoured.
+    /// </summary>
+    internal static async Task<RecordTransaction> BuildRefundAsync(
+        TxDbContext db, Guid eventId, Envelope envelope, JsonObject p, CancellationToken ct)
+    {
+        var paymentId = Require(p, "payment_id");
+        var purchases = await db.Transactions.AsNoTracking()
+            .Where(t => t.PaymentId == paymentId && t.Type == "purchase")
+            .ToListAsync(ct);
+
+        if (purchases.Count == 0)
+        {
+            // The purchase this refund reverses is not projected yet (captured.v1
+            // may still be in flight) — or never will be. Retryable, NOT poison: a
+            // few attempts, then the DLQ holds it, replayable once the purchase
+            // lands. Never write a refund we cannot attribute.
+            throw new InvalidOperationException(
+                $"no purchase row for payment {paymentId} yet — deferring the refund fact");
+        }
+
+        if (purchases.Count > 1)
+        {
+            // At most one purchase per payment is the invariant; more than one is
+            // corruption we must not guess through.
+            throw new PoisonEventException(new InvalidOperationException(
+                $"multiple purchase rows for payment {paymentId} — refund cannot be attributed"));
+        }
+
+        var origin = purchases[0];
+        return new RecordTransaction(
+            eventId,
+            paymentId,
+            origin.AccountId,
+            origin.UserId,
+            origin.MerchantId,
+            "refund",
+            (long?)p["amount_minor_units"]
+                ?? throw new PoisonEventException(new FormatException("payload missing 'amount_minor_units'")),
+            Require(p, "currency_code"),
+            Require(p, "reversal_ledger_transaction_id"),
+            origin.PspReference,
+            envelope.OccurredAt);
     }
 
     /// Validation guarantees these fields; the throw is the backstop that keeps

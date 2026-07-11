@@ -17,4 +17,8 @@
     <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.14.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="TransactionService.Tests" />
+  </ItemGroup>
+
 </Project>
