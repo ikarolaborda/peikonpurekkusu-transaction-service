@@ -25,29 +25,37 @@ public sealed class EventsCodec(HttpClient http, string registryBaseUrl)
 {
     private readonly ConcurrentDictionary<string, int> _ids = new();
 
-    public static Envelope? TryUnframe(byte[] value)
+    /// <summary>
+    /// Splits the frame into the producer's schema id and the raw JSON, so the
+    /// payload can be validated against that exact schema BEFORE any field is read.
+    /// </summary>
+    public static (int SchemaId, JsonObject Node)? TryParseFrame(byte[] value)
     {
         if (value.Length < 6 || value[0] != 0) return null;
         try
         {
-            var node = JsonNode.Parse(value.AsSpan(5).ToArray()) as JsonObject;
-            if (node is null) return null;
-            var eventId = (string?)node["event_id"];
-            var eventType = (string?)node["event_type"];
-            if (eventId is null || eventType is null) return null;
-            return new Envelope(
-                eventId,
-                eventType,
-                (int?)node["schema_version"] ?? 1,
-                DateTimeOffset.TryParse((string?)node["occurred_at"], out var at) ? at : DateTimeOffset.UtcNow,
-                (string?)node["tenant_id"] ?? "peikon",
-                (string?)node["correlation_id"] ?? eventId,
-                node["payload"] as JsonObject ?? []);
+            var schemaId = BinaryPrimitives.ReadInt32BigEndian(value.AsSpan(1, 4));
+            return JsonNode.Parse(value.AsSpan(5).ToArray()) is JsonObject node ? (schemaId, node) : null;
         }
         catch (JsonException)
         {
             return null;
         }
+    }
+
+    public static Envelope? ToEnvelope(JsonObject node)
+    {
+        var eventId = (string?)node["event_id"];
+        var eventType = (string?)node["event_type"];
+        if (eventId is null || eventType is null) return null;
+        return new Envelope(
+            eventId,
+            eventType,
+            (int?)node["schema_version"] ?? 1,
+            DateTimeOffset.TryParse((string?)node["occurred_at"], out var at) ? at : DateTimeOffset.UtcNow,
+            (string?)node["tenant_id"] ?? "peikon",
+            (string?)node["correlation_id"] ?? eventId,
+            node["payload"] as JsonObject ?? []);
     }
 
     public async Task<byte[]> FrameAsync(string topic, object envelope, CancellationToken ct)

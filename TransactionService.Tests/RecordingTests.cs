@@ -75,7 +75,7 @@ public class EnvelopeTests
     [Fact]
     public void Unframe_rejects_raw_json_without_the_confluent_header()
     {
-        Assert.Null(EventsCodec.TryUnframe(System.Text.Encoding.UTF8.GetBytes("{\"event_id\":\"x\"}")));
+        Assert.Null(EventsCodec.TryParseFrame(System.Text.Encoding.UTF8.GetBytes("{\"event_id\":\"x\"}")));
     }
 
     [Fact]
@@ -86,7 +86,9 @@ public class EnvelopeTests
         var framed = new byte[5 + json.Length];
         framed[0] = 0;
         json.CopyTo(framed, 5);
-        var env = EventsCodec.TryUnframe(framed);
+        var parsed = EventsCodec.TryParseFrame(framed);
+        Assert.NotNull(parsed);
+        var env = EventsCodec.ToEnvelope(parsed.Value.Node);
         Assert.NotNull(env);
         Assert.Equal("payments.payment.captured.v1", env!.EventType);
         Assert.Equal("p1", (string?)env.Payload["payment_id"]);

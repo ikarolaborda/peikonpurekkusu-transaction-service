@@ -7,12 +7,15 @@ namespace Peikon.Transactions.Infrastructure;
 /// <summary>
 /// Consumes payment facts and records immutable transactions:
 ///   payments.payment.captured.v1 → purchase row
-///   payments.payment.reversed.v1 → refund (reversing) row
-/// Idempotent (processed_events in the same DbContext transaction), offsets
-/// stored only after durable writes, 3 attempts → per-group DLQ.
+///   payments.payment.reversed.v1 → parked to DLQ (contract lacks refund fields)
+/// Payloads are validated against the schema id in the frame before any field
+/// is read — the transactions table is append-only, so a drifted producer must
+/// be dead-lettered, never written as a zero-amount row. Idempotent
+/// (processed_events in the same DbContext transaction), offsets stored only
+/// after durable writes, 3 attempts → per-group DLQ.
 /// </summary>
 public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<string, byte[]> producer,
-    IConfiguration config, ILogger<PaymentFactsConsumer> log) : BackgroundService
+    EventContractValidator validator, IConfiguration config, ILogger<PaymentFactsConsumer> log) : BackgroundService
 {
     private const string Group = "transaction-service";
     private static readonly string[] Topics =
@@ -37,9 +40,10 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
 
         while (!ct.IsCancellationRequested)
         {
+            ConsumeResult<string, byte[]>? result = null;
             try
             {
-                var result = consumer.Consume(ct);
+                result = consumer.Consume(ct);
                 if (result is null) continue;
                 if (HandleWithRetryAsync(result, ct).GetAwaiter().GetResult())
                 {
@@ -49,6 +53,16 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
             catch (OperationCanceledException)
             {
                 break;
+            }
+            catch (SchemaRegistryUnavailableException ex)
+            {
+                // Not poison and not skippable: if we moved on, the NEXT record's
+                // StoreOffset would commit past this one and the unvalidated
+                // event would be lost. Seek back and block until the registry
+                // answers — liveness traded for never writing an unvalidated fact.
+                log.LogWarning(ex, "schema registry unavailable — holding {Offset}", result!.TopicPartitionOffset);
+                consumer.Seek(result.TopicPartitionOffset);
+                Thread.Sleep(2000);
             }
             catch (ConsumeException ex)
             {
@@ -75,7 +89,7 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
                 // discarding it here would drop the message when the DLQ write fails.
                 return await DeadLetterAsync(result, ex.InnerException ?? ex, ct);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException and not SchemaRegistryUnavailableException)
             {
                 last = ex;
                 log.LogWarning(ex, "record failed (attempt {Attempt})", attempt);
@@ -90,10 +104,37 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
 
     private async Task HandleAsync(ConsumeResult<string, byte[]> result, CancellationToken ct)
     {
-        var envelope = EventsCodec.TryUnframe(result.Message.Value);
+        var parsed = EventsCodec.TryParseFrame(result.Message.Value);
+        if (parsed is null)
+        {
+            throw new PoisonEventException(new FormatException("unparseable envelope"));
+        }
+
+        try
+        {
+            await validator.ValidateAsync(parsed.Value.SchemaId, parsed.Value.Node, ct);
+        }
+        catch (Exception ex) when (ex is EventContractViolationException or UnknownSchemaIdException)
+        {
+            throw new PoisonEventException(ex);
+        }
+        // SchemaRegistryUnavailableException deliberately bubbles: transient,
+        // the run loop seeks back so the offset can never advance past it.
+
+        var envelope = EventsCodec.ToEnvelope(parsed.Value.Node);
         if (envelope is null || !Guid.TryParse(envelope.EventId, out var eventId))
         {
             throw new PoisonEventException(new FormatException("unparseable envelope"));
+        }
+
+        if (envelope.EventType.Contains("reversed"))
+        {
+            // The reversed.v1 payload cannot carry account/user/merchant fields
+            // (additionalProperties:false), so a refund fact recorded from it
+            // would be a permanent garbage row. Park until the refunds contract
+            // is completed; the DLQ keeps it replayable.
+            throw new PoisonEventException(new NotSupportedException(
+                "payments.payment.reversed.v1 lacks the fields a refund fact needs — parked until the refunds contract is built"));
         }
 
         await using var scope = scopes.CreateAsyncScope();
@@ -116,14 +157,15 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
         var p = envelope.Payload;
         var command = new RecordTransaction(
             eventId,
-            (string?)p["payment_id"] ?? "",
-            (string?)p["account_id"] ?? "",
-            (string?)p["user_id"] ?? "",
+            Require(p, "payment_id"),
+            Require(p, "account_id"),
+            Require(p, "user_id"),
             (string?)p["merchant_id"] ?? "",
-            envelope.EventType.Contains("reversed") ? "refund" : "purchase",
-            (long?)p["amount_minor_units"] ?? 0,
-            (string?)p["currency_code"] ?? "",
-            (string?)p["ledger_transaction_id"] ?? (string?)p["reversal_ledger_transaction_id"] ?? "",
+            "purchase",
+            (long?)p["amount_minor_units"]
+                ?? throw new PoisonEventException(new FormatException("payload missing 'amount_minor_units'")),
+            Require(p, "currency_code"),
+            Require(p, "ledger_transaction_id"),
             (string?)p["psp_reference"] ?? "",
             envelope.OccurredAt);
         await mediator.SendAsync(command, ct);
@@ -131,6 +173,12 @@ public sealed class PaymentFactsConsumer(IServiceScopeFactory scopes, IProducer<
         await db.SaveChangesAsync(ct);
         await tx.CommitAsync(ct);
     }
+
+    /// Validation guarantees these fields; the throw is the backstop that keeps
+    /// any future bypass from synthesizing money values out of nothing.
+    private static string Require(System.Text.Json.Nodes.JsonObject p, string key) =>
+        (string?)p[key]
+            ?? throw new PoisonEventException(new FormatException($"payload missing '{key}'"));
 
     /// <returns>true if the message is safely in the DLQ (offset may advance); false if the DLQ write failed (retry, don't lose it).</returns>
     private async Task<bool> DeadLetterAsync(ConsumeResult<string, byte[]> result, Exception? cause, CancellationToken ct)

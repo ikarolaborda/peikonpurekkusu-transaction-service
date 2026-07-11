@@ -40,6 +40,10 @@ builder.Services.AddSingleton<IProducer<string, byte[]>>(_ =>
 builder.Services.AddSingleton(_ => new EventsCodec(
     new HttpClient(),
     Env("SCHEMA_REGISTRY_URL", "http://apicurio-registry:8080/apis/ccompat/v7")));
+builder.Services.AddSingleton(sp => new EventContractValidator(
+    new HttpClient { Timeout = TimeSpan.FromSeconds(5) },
+    Env("SCHEMA_REGISTRY_URL", "http://apicurio-registry:8080/apis/ccompat/v7"),
+    sp.GetRequiredService<ILogger<EventContractValidator>>()));
 
 builder.Services.AddHostedService<OutboxRelay>();
 builder.Services.AddHostedService<PaymentFactsConsumer>();

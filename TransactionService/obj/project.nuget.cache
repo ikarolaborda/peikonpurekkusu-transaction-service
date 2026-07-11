@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "dgSpecHash": "4XRM7LhnZ6I=",
+  "success": true,
+  "projectFilePath": "/src/TransactionService/TransactionService.csproj",
+  "expectedPackageFiles": [
+    "/root/.nuget/packages/aspnetcore.healthchecks.npgsql/9.0.0/aspnetcore.healthchecks.npgsql.9.0.0.nupkg.sha512",
+    "/root/.nuget/packages/confluent.kafka/2.15.0/confluent.kafka.2.15.0.nupkg.sha512",
+    "/root/.nuget/packages/humanizer.core/3.0.10/humanizer.core.3.0.10.nupkg.sha512",
+    "/root/.nuget/packages/json.more.net/3.0.1/json.more.net.3.0.1.nupkg.sha512",
+    "/root/.nuget/packages/jsonpointer.net/7.0.1/jsonpointer.net.7.0.1.nupkg.sha512",
+    "/root/.nuget/packages/jsonschema.net/9.2.2/jsonschema.net.9.2.2.nupkg.sha512",
+    "/root/.nuget/packages/librdkafka.redist/2.15.0/librdkafka.redist.2.15.0.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.entityframeworkcore/10.0.9/microsoft.entityframeworkcore.10.0.9.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.entityframeworkcore.abstractions/10.0.9/microsoft.entityframeworkcore.abstractions.10.0.9.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.entityframeworkcore.analyzers/10.0.9/microsoft.entityframeworkcore.analyzers.10.0.9.nupkg.sha512",
+    "/root/.nuget/packages/microsoft.entityframeworkcore.relational/10.0.4/microsoft.entityframeworkcore.relational.10.0.4.nupkg.sha512",
+    "/root/.nuget/packages/npgsql/10.0.3/npgsql.10.0.3.nupkg.sha512",
+    "/root/.nuget/packages/npgsql.entityframeworkcore.postgresql/10.0.2/npgsql.entityframeworkcore.postgresql.10.0.2.nupkg.sha512"
+  ],
+  "logs": []
+}
