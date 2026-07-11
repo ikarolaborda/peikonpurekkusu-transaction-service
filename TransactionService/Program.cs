@@ -49,7 +49,43 @@ builder.Services.AddHostedService<OutboxRelay>();
 builder.Services.AddHostedService<PaymentFactsConsumer>();
 builder.Services.AddHealthChecks().AddNpgSql(dbConn, tags: ["ready"]);
 
+builder.Services.AddSingleton(sp => new GatewayAssertionValidator(
+    new HttpClient { Timeout = TimeSpan.FromSeconds(5) },
+    Env("GATEWAY_JWKS_URL", "http://user-service:8080/.well-known/jwks.json"),
+    sp.GetRequiredService<ILogger<GatewayAssertionValidator>>()));
+
 var app = builder.Build();
+
+await app.Services.GetRequiredService<GatewayAssertionValidator>().InitializeAsync();
+
+// Trust identity only from a verified gateway assertion, never from a raw header a
+// peer on the internal network could forge. Runs before the endpoints, which keep
+// reading X-User-Id — now guaranteed to originate from ForwardAuth. Health is open.
+app.Use(async (http, next) =>
+{
+    if (http.Request.Path.StartsWithSegments("/health"))
+    {
+        await next();
+        return;
+    }
+
+    var validator = http.RequestServices.GetRequiredService<GatewayAssertionValidator>();
+    var assertion = http.Request.Headers["X-Gateway-Assertion"].ToString();
+    var userId = string.IsNullOrEmpty(assertion) ? null : await validator.ValidateAsync(assertion);
+    if (string.IsNullOrEmpty(userId))
+    {
+        http.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await http.Response.WriteAsJsonAsync(new { title = "Unauthorized", status = 401, detail = "invalid gateway assertion" });
+        return;
+    }
+
+    http.Request.Headers.Remove("X-User-Id");
+    http.Request.Headers.Remove("X-Auth-Amr");
+    http.Request.Headers.Remove("X-Auth-Time");
+    http.Request.Headers.Remove("X-Gateway-Assertion");
+    http.Request.Headers["X-User-Id"] = userId;
+    await next();
+});
 
 await using (var scope = app.Services.CreateAsyncScope())
 {
